@@ -1,0 +1,147 @@
+- name: build opensips
+  hosts: all
+  tasks:
+    - name: "clone opensips"
+      git:
+        repo: https://github.com/OpenSIPS/opensips.git
+        dest: /home/user/opensips
+    - name: Install dependencies
+      become: true
+      apt: name={{item}} state=installed
+      with_items:
+           - build-essential
+           - postgresql
+           - postgresql-client
+           - linux-headers*
+           - flex
+           - bison
+           - libncurses5-dev
+    - name: build OpenSIPS
+      shell: TLS=1 make -j4 include_modules="db_postgres" modules
+      args:
+        chdir: /home/user/opensips
+    - name: install opensips
+      shell: TLS=1 make include_modules="db_postgres" install
+      become: true
+      args:
+        chdir: /home/user/opensips
+- name: Configure opensips proxies
+  hosts: proxyhosts
+  tasks:
+    - name: "CLEANUP: ensure opensips is stopped (and disable it at boot)"
+      service: name=opensips state=stopped enabled=no
+      become: true
+    - name: "VRRP: generate network interfaces config"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 interfaces-{{inventory_hostname}}.m4 > ../{{inventory_hostname}}-interfaces
+    - name: "VRRP: configure network interfaces"
+      template: src={{item.src}} dest={{item.dest}}
+      become: true
+      with_items:
+        - {src: 'opensips/{{inventory_hostname}}-interfaces', dest: '/etc/network/interfaces'}
+        - {src: 'opensips/configs/rt_tables', dest: '/etc/iproute2/rt_tables'}
+    - name: "CLEANUP: ensure network-manager is stopped (and disable it at boot)"
+      service: name=network-manager state=stopped enabled=no
+      become: true
+    - name: "CLEANUP: kill opensips"
+      shell: "pkill -9 opensips || true"
+      become: true
+    - name: install the latest version of keepalived
+      become: true
+      package:
+        name: keepalived
+        state: latest
+    - name: "create group keepalived_script"
+      become: true
+      group:
+        name: keepalived_script
+        state: present
+    - name: "create user keepalived_script"
+      become: true
+      user:
+        name: keepalived_script
+        group: keepalived_script
+    - name: "VRRP: generate keepalived config"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 keepalived-{{inventory_hostname}}.m4 > ../{{inventory_hostname}}-keepalived.conf
+    - name: "VRRP: deploy keepalived config"
+      template: src={{item.src}} dest={{item.dest}}
+      become: true
+      with_items:
+        - {src: 'opensips/{{inventory_hostname}}-keepalived.conf', dest: '/etc/keepalived/keepalived.conf'}
+        - {src: 'opensips/configs/notify-keepalived.sh', dest: '/home/keepalived_script/notify-keepalived.sh'}
+        - {src: 'opensips/configs/sysctl.conf', dest: '/etc/sysctl.d/vrrp.conf'}
+    - name: "VRRP: chown keepalived script"
+      become: true
+      file:
+        path: /home/keepalived_script/notify-keepalived.sh
+        owner: keepalived_script
+        group: keepalived_script
+        mode: 755
+    - name: "VRRP: allow binding to non-existent ip"
+      shell: "sysctl -p /etc/sysctl.d/vrrp.conf"
+      become: true
+    - name: "VRRP: ensure keepalived is running "
+      service: name=keepalived state=started enabled=yes masked=no
+      become: true
+    - name: "OPENSIPS: generate opensips config"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 opensips-{{inventory_hostname}}.m4 > ../{{inventory_hostname}}-opensips.conf
+    - name : "OPENSIPS: deploy opensips conf"
+      template: src={{item.src}} dest={{item.dest}}
+      become: true
+      with_items:
+        - {src: 'opensips/{{inventory_hostname}}-opensips.conf', dest: '/etc/opensips/opensips.cfg'}
+        - {src: 'opensips/configs/opensipsctlrc', dest: '/etc/opensips/opensipsctlrc'}
+- name: Configure db host
+  hosts: dbhosts
+  tasks:
+    - name: "DB: generate DB config pg_hba"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 pg_hba-template.m4 > ../pg_hba.conf
+    - name: "DB: generate DB config populate"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 populate-template.m4 > ../populate.sql
+    - name: "DB: generate DB config postgresql"
+      local_action:
+        module: shell
+        chdir: opensips/templates
+        _raw_params: m4 postgresql-template.m4 > ../postgresql.conf
+    - name : "DB: deploy DB conf"
+      template: src={{item.src}} dest={{item.dest}}
+      become: true
+      with_items:
+        - {src: opensips/configs/opensipsctlrc, dest: /etc/opensips/opensipsctlrc}
+        - {src: 'opensips/postgresql.conf', dest: '/etc/postgresql/9.6/main/postgresql.conf'}
+        - {src: 'opensips/pg_hba.conf', dest: '/etc/postgresql/9.6/main/pg_hba.conf'}
+        - {src: 'opensips/populate.sql', dest: '/home/user/populate.sql'}
+#@db: opensipsdbctl create
+    - name: "populate postgre tables"
+      become: postgres
+      shell: "psql -U postgres -f /home/user/populate.sql"
+    - name: "DB: restart database"
+      service: name=postgresql state=restarted
+      become: true
+#@registrar:
+# - freepbx iso
+# - add users and extensions
+- name: Restart opensips
+  hosts: proxyhosts
+  tasks:
+    - name: "VRRP: restart keepalived"
+      service: name=keepalived state=restarted
+      become: true
+    - name: "OPENSIPS: start opensips"
+      shell: "opensips -n 1 -f /etc/opensips/opensips.cfg"
+      become: true
+

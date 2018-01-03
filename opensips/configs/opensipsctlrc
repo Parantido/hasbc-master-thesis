@@ -1,0 +1,5 @@
+DBENGINE=PGSQL
+DBHOST=localhost
+DBNAME=opensips
+DBRWUSER=opensips
+DBRWPW="opensipsrw"

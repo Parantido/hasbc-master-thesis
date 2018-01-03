@@ -1,0 +1,10 @@
+[proxyhosts]
+w520opensips
+w530opensips
+
+[dbhosts]
+dbhost
+
+[all:children]
+proxyhosts
+dbhosts
